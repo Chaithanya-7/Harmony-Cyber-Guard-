@@ -2,7 +2,9 @@
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-region, x-request-id',
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT',
+  'Access-Control-Max-Age': '86400',
 };
 
 // --- Advanced Detection Configuration ---
@@ -18,26 +20,26 @@ interface DetectionRule {
 
 const detectionRules: DetectionRule[] = [
   // --- Harassment / Cyberbullying ---
-  { pattern: /\b(kill|murder|hurt|harm|beat|punch|stab|shoot)\s*(you|yourself|u|ur)/gi, category: 'Harassment', score: 30, label: 'Direct Threat' },
-  { pattern: /\b(die|death)\b/gi, category: 'Harassment', score: 20, label: 'Hostile Language' },
-  { pattern: /\b(i('ll|m\s+gonna|will)\s+(kill|hurt|find|get))/gi, category: 'Harassment', score: 40, label: 'Intent to Harm' },
-  { pattern: /\b(ugly|fat|stupid|dumb|idiot|loser|pathetic|worthless|useless)\b/gi, category: 'Harassment', score: 15, label: 'Insult' },
-  { pattern: /\b(go\s*away|leave|disappear|kill\s*yourself|kys)\b/gi, category: 'Harassment', score: 50, label: 'Severe Harassment' },
+  { pattern: /\b(kill|murder|hurt|harm|beat|punch|stab|shoot)\s*(you|yourself|u|ur)/i, category: 'Harassment', score: 30, label: 'Direct Threat' },
+  { pattern: /\b(die|death)\b/i, category: 'Harassment', score: 20, label: 'Hostile Language' },
+  { pattern: /\b(i('ll|m\s+gonna|will)\s+(kill|hurt|find|get))/i, category: 'Harassment', score: 40, label: 'Intent to Harm' },
+  { pattern: /\b(ugly|fat|stupid|dumb|idiot|loser|pathetic|worthless|useless)\b/i, category: 'Harassment', score: 15, label: 'Insult' },
+  { pattern: /\b(go\s*away|leave|disappear|kill\s*yourself|kys)\b/i, category: 'Harassment', score: 50, label: 'Severe Harassment' },
   // (Slurs masked for code safety policies, but pattern logic remains similar to original)
 
   // --- Phishing / Credential Theft ---
-  { pattern: /\b(verify\s*(your)?\s*account|confirm\s*(your)?\s*identity|unauthorized\s*access)\b/gi, category: 'Phishing', score: 35, label: 'Fake Security Alert' },
-  { pattern: /\b(click\s*here|link\s*below|open\s*(the)?\s*attachment|login\s*at)\b/gi, category: 'Phishing', score: 25, label: 'Suspicious Link Prompt' },
-  { pattern: /\b(password|pin|ssn|social\s*security|credit\s*card)\b/gi, category: 'Phishing', score: 40, label: 'Sensitive Data Request' },
+  { pattern: /\b(verify\s*(your)?\s*account|confirm\s*(your)?\s*identity|unauthorized\s*access)\b/i, category: 'Phishing', score: 35, label: 'Fake Security Alert' },
+  { pattern: /\b(click\s*here|link\s*below|open\s*(the)?\s*attachment|login\s*at)\b/i, category: 'Phishing', score: 25, label: 'Suspicious Link Prompt' },
+  { pattern: /\b(password|pin|ssn|social\s*security|credit\s*card)\b/i, category: 'Phishing', score: 40, label: 'Sensitive Data Request' },
 
   // --- Financial Scams ---
-  { pattern: /\b(won|winner|lottery|prize|reward|cash|claim)\b/gi, category: 'Financial', score: 30, label: 'Too Good To Be True' },
-  { pattern: /\b(investment|crypto|profit|bitcoin|money\s*back|guaranteed\s*return)\b/gi, category: 'Financial', score: 35, label: 'Investment Scam' },
-  { pattern: /\b(gift\s*card|steam\s*card|amazon\s*card|wire\s*transfer)\b/gi, category: 'Financial', score: 45, label: 'Non-taceable Payment Request' },
+  { pattern: /\b(won|winner|lottery|prize|reward|cash|claim)\b/i, category: 'Financial', score: 40, label: 'Too Good To Be True' },
+  { pattern: /\b(investment|crypto|profit|bitcoin|money\s*back|guaranteed\s*return)\b/i, category: 'Financial', score: 35, label: 'Investment Scam' },
+  { pattern: /\b(gift\s*card|steam\s*card|amazon\s*card|wire\s*transfer)\b/i, category: 'Financial', score: 45, label: 'Non-taceable Payment Request' },
 
   // --- Emergency / Pressure Scams ---
-  { pattern: /\b(urgent|immediately|act\s*now|action\s*required|arrest|warrant|police|irs)\b/gi, category: 'Emergency', score: 30, label: 'Artificial Urgency' },
-  { pattern: /\b(family\s*member|grandson|accident|hospital|jail)\b/gi, category: 'Emergency', score: 35, label: 'Emergency False Flag' },
+  { pattern: /\b(urgent|immediately|act\s*now|action\s*required|arrest|warrant|police|irs)\b/i, category: 'Emergency', score: 30, label: 'Artificial Urgency' },
+  { pattern: /\b(family\s*member|grandson|accident|hospital|jail)\b/i, category: 'Emergency', score: 35, label: 'Emergency False Flag' },
 ];
 
 function extractEntities(text: string) {
@@ -142,7 +144,7 @@ function analyzeText(text: string): {
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
+    return new Response('ok', { headers: corsHeaders });
   }
 
   try {
@@ -155,34 +157,52 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    const startTime = Date.now();
     console.log(`Analyzing message: ${message.substring(0, 50)}...`);
 
-    const analysis = analyzeText(message);
-
-    console.log(`Analysis: Level=${analysis.threatLevel} Score=${analysis.score} Categories=${analysis.categories.join(',')}`);
-
-    // Generate smart recommendation based on category
-    let recommendation = 'Message appears safe';
-    if (analysis.threatLevel !== 'safe') {
-      if (analysis.categories.includes('Financial')) {
-        recommendation = 'High Risk: Do not send money or share bank details.';
-      } else if (analysis.categories.includes('Phishing')) {
-        recommendation = 'Security Alert: Do not click any links or login.';
-      } else if (analysis.categories.includes('Emergency')) {
-        recommendation = 'Scam Alert: Verify this emergency independently. Do not panic.';
-      } else if (analysis.categories.includes('Harassment')) {
-        recommendation = 'Harassment Detected: Block sender and report if escalated.';
-      } else {
-        recommendation = 'Caution: Generic suspicious patterns detected.';
+    // 1. Try Dedicated ML Inference Service (Deep Path - ModernBERT)
+    const mlInferenceUrl = Deno.env.get('ML_INFERENCE_URL');
+    if (mlInferenceUrl) {
+      try {
+        const mlResponse = await fetch(`${mlInferenceUrl}/analyze/text`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: message })
+        });
+        
+        if (mlResponse.ok) {
+          const result = await mlResponse.json();
+          return new Response(JSON.stringify(result), { 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+      } catch (err) {
+        console.warn('[AnalyzeText] ML Service failed, falling back to heuristics:', err);
       }
     }
 
+    // 2. Fallback to Local Heuristics
+    const analysis = analyzeText(message);
+    
+    // Map to unified MLResponse format
+    const response = {
+      riskScore: analysis.score,
+      riskLevel: analysis.threatLevel === 'danger' ? 'critical' : analysis.threatLevel,
+      confidence: 0.7,
+      signals: analysis.indicators.map(label => ({
+        id: 'heuristic_signal',
+        label,
+        probability: 0.8
+      })),
+      categories: analysis.categories.map(c => c.toLowerCase()),
+      explanation: `Heuristic analysis detected ${analysis.categories.join(' and ')} patterns.`,
+      recommendedAction: analysis.threatLevel !== 'safe' ? 'Exercise caution with this message.' : 'No immediate threat detected.',
+      isHeuristicFallback: true,
+      processingTimeMs: Date.now() - startTime
+    };
+
     return new Response(
-      JSON.stringify({
-        senderNumber: senderNumber || 'Unknown',
-        ...analysis,
-        recommendation
-      }),
+      JSON.stringify(response),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (error) {

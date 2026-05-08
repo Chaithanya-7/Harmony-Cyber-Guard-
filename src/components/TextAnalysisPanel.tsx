@@ -20,6 +20,7 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "@/hooks/use-toast";
+import { textFeatureExtractor } from "@/utils/audio/TextFeatureExtractor";
 
 interface AnalyzedMessage {
   id: string;
@@ -55,6 +56,7 @@ export function TextAnalysisPanel() {
   const [analyzedMessages, setAnalyzedMessages] = useState<AnalyzedMessage[]>([]);
   const [blockedNumbers, setBlockedNumbers] = useState<BlockedNumber[]>([]);
   const [activeTab, setActiveTab] = useState<'analyze' | 'blocked'>('analyze');
+
 
   useEffect(() => {
     if (user) {
@@ -97,113 +99,42 @@ export function TextAnalysisPanel() {
 
     setIsAnalyzing(true);
 
-    // Enhanced Local Detection (Advanced Fallback)
-    const patterns = {
-      Phishing: [/\b(click|link|verify|login|account|secure|update)\b/i, /http[s]?:\/\//i],
-      Financial: [/\b(money|bank|transfer|winner|prize|crypto|bitcoin|invest)\b/i, /\$\d+/],
-      Emergency: [/\b(arrest|warrant|jail|immediate|urgent|help|accident)\b/i],
-      Harassment: [/\b(stupid|hate|kill|ugly|idiot|fat)\b/i]
-    };
-
-    const categories: string[] = [];
+    // Entity Extraction (Mock)
     const entities = { urls: [] as string[], phones: [] as string[], crypto: [] as string[] };
-    let localScore = 0;
-    const localIndicators: string[] = [];
-
-    // Categorization
-    if (patterns.Phishing.some(p => p.test(messageText))) {
-      categories.push('Phishing');
-      localScore += 30;
-      localIndicators.push('Phishing keywords detected');
-    }
-    if (patterns.Financial.some(p => p.test(messageText))) {
-      categories.push('Financial');
-      localScore += 40;
-      localIndicators.push('Financial/Crypto keywords detected');
-    }
-    if (patterns.Emergency.some(p => p.test(messageText))) {
-      categories.push('Emergency');
-      localScore += 30;
-      localIndicators.push('Urgency/Emergency language detected');
-    }
-    if (patterns.Harassment.some(p => p.test(messageText))) {
-      categories.push('Harassment');
-      localScore += 50;
-      localIndicators.push('Harassment detected');
-    }
-
-    // Entity Extraction (Mock)
-    // Entity Extraction (Mock)
     const urlMatch = messageText.match(/https?:\/\/[^\s]+/g);
     if (urlMatch) {
       entities.urls = urlMatch;
-      localIndicators.push(`${urlMatch.length} suspicious link(s)`);
     }
     const phoneMatch = messageText.match(/\d{3}[-\s]?\d{3}[-\s]?\d{4}/g);
     if (phoneMatch) {
       entities.phones = phoneMatch;
     }
 
-    const isLocalScam = localScore >= 40 || categories.length > 0;
-
     try {
-      // Define variables to hold backend result
-      let data: any = null;
-      let backendError: any = null;
-
-      try {
-        const result = await supabase.functions.invoke('analyze-text', {
-          body: {
-            message: messageText,
-            senderNumber: senderNumber || 'Unknown'
-          }
-        });
-        data = result.data;
-        backendError = result.error;
-      } catch (err) {
-        backendError = err;
-      }
-
-      let finalData = data;
-
-      // Smart Fallback Logic
-      if (backendError || !data || (data.threatLevel === 'safe' && isLocalScam)) {
-        console.warn("Using offline analysis fallback", backendError);
-        finalData = {
-          senderNumber: senderNumber || 'Unknown',
-          isCyberbullying: categories.includes('Harassment'),
-          threatLevel: localScore >= 60 ? 'danger' : (localScore >= 30 ? 'warning' : 'safe'),
-          indicators: localIndicators,
-          score: localScore,
-          isScam: categories.includes('Phishing') || categories.includes('Financial') || categories.includes('Emergency'),
-          categories: categories.length > 0 ? categories : ['Unknown Suspicion'],
-          entities: entities,
-          recommendation: isLocalScam
-            ? "Offline detection: This message matches known scam patterns. Exercise caution."
-            : "No threats detected locally."
-        };
-
-        if (backendError) {
-          toast({ title: "Offline Mode", description: "Backend unreachable. Using local analysis engine.", variant: "default" });
+      // Use Fast Server-Side Analysis via Supabase Edge Function
+      const { data, error } = await supabase.functions.invoke('analyze-text', {
+        body: { 
+          message: messageText, 
+          senderNumber: senderNumber || 'Unknown' 
         }
-      }
+      });
 
-      // Use finalData below...
+      if (error) throw error;
+      const analysis = data;
+
       const result: AnalyzedMessage = {
-        id: crypto.randomUUID(),
-        senderNumber: finalData.senderNumber,
+        id: Math.random().toString(36).substring(2, 15),
+        senderNumber: analysis.senderNumber || 'Unknown',
         message: messageText,
-        isCyberbullying: finalData.isCyberbullying,
-        isScam: finalData.isScam,
-        threatLevel: finalData.threatLevel,
-        indicators: finalData.indicators,
-        categories: finalData.categories || [],
-        entities: finalData.entities || { urls: [], phones: [], crypto: [] },
-        score: finalData.score,
+        isCyberbullying: !!analysis.isCyberbullying,
+        isScam: !!analysis.isScam,
+        threatLevel: (analysis.threatLevel as 'safe' | 'warning' | 'danger') || 'safe',
+        indicators: analysis.indicators || [],
+        categories: analysis.categories || [],
+        entities: analysis.entities || entities,
+        score: analysis.score || 0,
         analyzedAt: new Date()
       };
-
-      setAnalyzedMessages(prev => [result, ...prev]);
 
       // Save to database
       if (user) {
@@ -211,23 +142,25 @@ export function TextAnalysisPanel() {
           user_id: user.id,
           sender_number: senderNumber || 'Unknown',
           message_content: messageText,
-          is_cyberbullying: finalData.isCyberbullying,
-          threat_level: finalData.threatLevel,
-          detected_indicators: finalData.indicators
+          is_cyberbullying: analysis.isCyberbullying,
+          threat_level: analysis.threatLevel,
+          detected_indicators: analysis.indicators
         });
       }
 
+      setAnalyzedMessages(prev => [result, ...prev]);
+
       // Show appropriate toast
-      if (finalData.threatLevel === 'danger') {
+      if (analysis.threatLevel === 'danger') {
         toast({
-          title: finalData.isScam ? "⚠️ Scam Detected!" : "⚠️ Cyberbullying Detected!",
-          description: finalData.recommendation || "High risk content detected.",
+          title: analysis.isScam ? "⚠️ Scam Detected!" : "⚠️ Cyberbullying Detected!",
+          description: analysis.recommendation || "High risk content detected.",
           variant: "destructive"
         });
-      } else if (finalData.threatLevel === 'warning') {
+      } else if (analysis.threatLevel === 'warning') {
         toast({
           title: "Suspicious Content",
-          description: finalData.recommendation || "Warning: Potential risk detected.",
+          description: analysis.recommendation || "Warning: Potential risk detected.",
         });
       } else {
         toast({
@@ -240,11 +173,31 @@ export function TextAnalysisPanel() {
       setMessageText("");
 
     } catch (error) {
-      console.error('Error analyzing message:', error);
+      console.warn('Supabase function failed, falling back to local analysis:', error);
+      
+      // Fallback: Local Heuristic Analysis
+      const heuristicResult = textFeatureExtractor.extract(messageText);
+      
+      const result: AnalyzedMessage = {
+        id: Math.random().toString(36).substring(2, 15),
+        senderNumber: senderNumber || 'Unknown',
+        message: messageText,
+        isCyberbullying: heuristicResult.cyberbullyingScore > 0.3,
+        isScam: heuristicResult.textFraudScore > 0.5,
+        threatLevel: heuristicResult.textFraudScore > 0.7 ? 'danger' : (heuristicResult.textFraudScore > 0.3 ? 'warning' : 'safe'),
+        indicators: heuristicResult.threatPhrases || [],
+        categories: heuristicResult.threatPhrases.slice(0, 2) || [],
+        entities: entities,
+        score: Math.round(heuristicResult.textFraudScore * 100),
+        analyzedAt: new Date()
+      };
+
+      setAnalyzedMessages(prev => [result, ...prev]);
+      setMessageText("");
+
       toast({
-        title: "Analysis Failed",
-        description: "Could not analyze the message. Please try again.",
-        variant: "destructive"
+        title: "Local Analysis (Fallback)",
+        description: "Server-side analysis was unavailable, used local engine instead.",
       });
     } finally {
       setIsAnalyzing(false);
@@ -370,20 +323,20 @@ export function TextAnalysisPanel() {
                   className="resize-none"
                 />
               </div>
-              <Button
-                onClick={analyzeMessage}
-                disabled={isAnalyzing || !messageText.trim()}
-                className="w-full gap-2"
-              >
-                {isAnalyzing ? (
-                  <>Analyzing...</>
-                ) : (
-                  <>
-                    <Send className="h-4 w-4" />
-                    Analyze Message
-                  </>
-                )}
-              </Button>
+                <Button
+                  onClick={analyzeMessage}
+                  disabled={isAnalyzing || !messageText.trim()}
+                  className="w-full gap-2 relative overflow-hidden"
+                >
+                  {isAnalyzing ? (
+                    "Analyzing Message..."
+                  ) : (
+                    <>
+                      <Send className="h-4 w-4" />
+                      Analyze Message (Fast Scan)
+                    </>
+                  )}
+                </Button>
             </CardContent>
           </Card>
 
@@ -440,6 +393,11 @@ export function TextAnalysisPanel() {
                               {cat}
                             </Badge>
                           ))}
+                          {msg.isCyberbullying && (
+                            <Badge variant="destructive" className="mr-2 bg-red-100 text-red-800 hover:bg-red-200 border-red-200">
+                              Cyberbullying Detected
+                            </Badge>
+                          )}
                           {msg.isScam && !msg.categories?.length && (
                             <Badge variant="secondary" className="mr-2 bg-purple-100 text-purple-800 hover:bg-purple-200 border-purple-200">
                               Scam Attempt

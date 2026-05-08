@@ -42,6 +42,10 @@ export interface AudioFeatures {
 
   // Advanced Society Protection
   syntheticProbability: number;
+
+  // Silence/Energy Gating
+  isSilent: boolean;
+  hasSpeech: boolean;
 }
 
 interface FrequencyBin {
@@ -64,6 +68,18 @@ export class AudioFeatureExtractor {
     const data = audioData instanceof Float32Array
       ? audioData
       : new Float32Array(audioData);
+
+    // RMS Energy calculation to detect pure silence
+    let sumSquares = 0;
+    for (let i = 0; i < data.length; i++) {
+      sumSquares += data[i] * data[i];
+    }
+    const rmsEnergy = Math.sqrt(sumSquares / (data.length || 1));
+    const isSilent = rmsEnergy < 0.005; // Strict energy threshold
+
+    if (isSilent) {
+      return this.getSilentFeatures();
+    }
 
     // Extract individual feature categories
     const pitchFeatures = this.extractPitchFeatures(data);
@@ -102,6 +118,21 @@ export class AudioFeatureExtractor {
       overallStressScore,
       audioQualityScore,
       syntheticProbability,
+      isSilent: false,
+      hasSpeech: temporalFeatures.speechRate > 0.1,
+    };
+  }
+
+  private getSilentFeatures(): AudioFeatures {
+    return {
+      pitchMean: 0, pitchVariance: 0, pitchRange: 0, pitchSlope: 0,
+      energyMean: 0, energyVariance: 0, energySpikes: 0, energyDynamicRange: 0,
+      voiceStress: 0, jitter: 0, shimmer: 0, harmonicToNoiseRatio: 0,
+      spectralCentroid: 0, spectralFlatness: 0, spectralRolloff: 0, spectralFlux: 0,
+      speechRate: 0, articulationRate: 0, pauseRatio: 1, zeroCrossingRate: 0,
+      backgroundEntropy: 0, backgroundNoiseType: 'clean',
+      overallStressScore: 0, audioQualityScore: 1, syntheticProbability: 0,
+      isSilent: true, hasSpeech: false,
     };
   }
 
@@ -529,31 +560,39 @@ export class AudioFeatureExtractor {
     background: { backgroundEntropy: number },
     spectral: { spectralFlux: number }
   ): number {
-    // Heuristics for Deepfake / Synthetic Voice Detection
-    // 1. "Too Perfect" Pitch: AI often lacks natural micro-tremors (very low jitter).
-    // 2. Sterile Background: AI generation usually has zero background noise/entropy.
-    // 3. Low Flux: AI transitions are sometimes mathematically smoothed.
+    // UPDATED: Conservative Co-occurrence Model for Deepfake Detection
+    // We only flag as synthetic if MULTIPLE signals align simultaneously.
+    
+    let indicators = 0;
+    let confidence = 0;
 
-    let score = 0;
-
-    // A. Unnaturally stable pitch (Low Jitter)
-    // Human jitter is usually 0.002 - 0.04. AI can be < 0.001.
-    // Normalized input 0-1 implies raw / max.
-    if (stress.jitter < 0.1) {
-      score += 0.4 * (1 - stress.jitter * 10); // Boost score as jitter approaches 0
+    // 1. Unnatural Stability (AI lacks micro-tremors)
+    // Human voice naturally has some jitter/shimmer even in professionals.
+    if (stress.jitter < 0.05 && stress.shimmer < 0.05) {
+      indicators++;
+      confidence += 0.3;
     }
 
-    // B. Unnaturally stable amplitude (Low Shimmer)
-    if (stress.shimmer < 0.1) {
-      score += 0.3 * (1 - stress.shimmer * 10);
+    // 2. Spectral Sterility (Low Flux/Change)
+    if (spectral.spectralFlux < 0.15) {
+      indicators++;
+      confidence += 0.3;
     }
 
-    // C. Sterile Environment (Low Entropy + Low Flux)
-    if (background.backgroundEntropy < 0.2 && spectral.spectralFlux < 0.2) {
-      score += 0.3;
+    // 3. Environment Sterility (Zero background entropy)
+    // This is often 0 in generated audio but rarely 0 in real calls.
+    if (background.backgroundEntropy < 0.1) {
+      indicators++;
+      confidence += 0.2;
     }
 
-    return Math.min(1, Math.max(0, score));
+    // SCORING: Only provide high probability if at least 2 indicators align.
+    if (indicators < 2) return 0;
+    
+    // If all three align, we are highly suspicious.
+    if (indicators === 3) return Math.min(0.85, confidence + 0.15);
+
+    return Math.min(0.7, confidence);
   }
 
   private calculateSlope(values: number[]): number {

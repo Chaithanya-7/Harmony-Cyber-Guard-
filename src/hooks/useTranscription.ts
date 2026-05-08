@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { textFeatureExtractor } from '@/utils/audio/TextFeatureExtractor';
+import { analyzeTextWithML } from '@/lib/ml';
 
 export interface TranscriptionSegment {
   text: string;
@@ -31,72 +32,34 @@ export function useTranscription(options: UseTranscriptionOptions = {}) {
   const [segments, setSegments] = useState<TranscriptionSegment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [processingTime, setProcessingTime] = useState(0);
+  const [isModelLoading, setIsModelLoading] = useState(false);
+  const [modelProgress, setModelProgress] = useState(0);
 
   const accumulatedTranscriptRef = useRef<string>('');
   const accumulatedSegmentsRef = useRef<TranscriptionSegment[]>([]);
+  const optionsRef = useRef(options);
+  
+  useEffect(() => {
+    optionsRef.current = options;
+  }, [options]);
+
   const recognitionRef = useRef<any>(null); // Web Speech API
 
-  // --- Web Speech API (Offline Real-time) ---
+  // --- Whisper Web Worker (Offline Real-time AI Transcription) ---
+  const processAudioChunk = useCallback((audioData: Float32Array) => {
+    if (!whisperWorkerRef.current || !isTranscribing) return;
+    
+    // Send to web worker for transcription
+    whisperWorkerRef.current.postMessage({
+      type: 'transcribe',
+      audioData: audioData
+    });
+  }, [isTranscribing]);
+
   const startStreaming = useCallback(() => {
-    if (typeof window !== 'undefined') {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = options.language || 'en-US';
-
-        recognition.onresult = (event: any) => {
-          let finalChunk = '';
-          let interimChunk = '';
-
-          for (let i = event.resultIndex; i < event.results.length; ++i) {
-            if (event.results[i].isFinal) {
-              finalChunk += event.results[i][0].transcript;
-            } else {
-              interimChunk += event.results[i][0].transcript;
-            }
-          }
-
-          if (finalChunk) {
-            accumulatedTranscriptRef.current += (accumulatedTranscriptRef.current ? ' ' : '') + finalChunk;
-            setTranscript(accumulatedTranscriptRef.current);
-
-            const newSegment = {
-              text: finalChunk,
-              start: Date.now() / 1000,
-              end: Date.now() / 1000 + 1,
-              confidence: 0.9
-            };
-            accumulatedSegmentsRef.current.push(newSegment);
-            setSegments([...accumulatedSegmentsRef.current]);
-
-            if (options.onTranscript) {
-              options.onTranscript({
-                text: finalChunk,
-                segments: [newSegment]
-              });
-            }
-          }
-
-          if (interimChunk && options.onPartialTranscript) {
-            options.onPartialTranscript(interimChunk);
-          }
-        };
-
-        recognition.onerror = (event: any) => {
-          console.warn("Speech recognition error", event.error);
-          setError(event.error);
-        };
-
-        recognitionRef.current = recognition;
-        recognition.start();
-        setIsTranscribing(true);
-      } else {
-        setError("Speech Recognition not supported in this browser.");
-      }
-    }
-  }, [options]);
+    setIsTranscribing(true);
+    console.log('[Transcription] Started Web Worker Streaming');
+  }, []);
 
   const stopStreaming = useCallback(() => {
     if (recognitionRef.current) {
@@ -104,6 +67,80 @@ export function useTranscription(options: UseTranscriptionOptions = {}) {
       recognitionRef.current = null;
     }
     setIsTranscribing(false);
+  }, []);
+
+  // --- Web Worker for Advanced Whisper AI Transcription ---
+  const whisperWorkerRef = useRef<Worker | null>(null);
+  
+  useEffect(() => {
+    // Initialize Web Worker for Whisper
+    if (typeof window !== 'undefined') {
+      try {
+        whisperWorkerRef.current = new Worker(new URL('../workers/whisper.worker.ts', import.meta.url), {
+          type: 'module'
+        });
+        
+        whisperWorkerRef.current.onmessage = (e) => {
+          const { type, text, error, progress } = e.data;
+          
+          if (type === 'progress') {
+            setIsModelLoading(true);
+            if (progress.status === 'progress') {
+              setModelProgress(progress.progress);
+            }
+          }
+          
+          if (type === 'ready') {
+            setIsModelLoading(false);
+            setModelProgress(100);
+            console.log('[Whisper Local] AI Model Ready');
+          }
+
+          if (type === 'result' && text) {
+             const cleanedText = text.trim();
+             if (cleanedText) {
+                // Determine if we should add a period or just a space
+                const isShort = cleanedText.split(' ').length < 3;
+                const shouldAddPeriod = !/[.!?]$/.test(cleanedText) && !isShort;
+                const formattedText = cleanedText + (shouldAddPeriod ? '.' : '');
+
+                accumulatedTranscriptRef.current += (accumulatedTranscriptRef.current ? ' ' : '') + formattedText;
+                setTranscript(accumulatedTranscriptRef.current);
+                
+                const newSegment = {
+                  text: formattedText,
+                  start: Date.now() / 1000,
+                  end: Date.now() / 1000 + 1,
+                  confidence: 0.9
+                };
+                accumulatedSegmentsRef.current.push(newSegment);
+                setSegments([...accumulatedSegmentsRef.current]);
+
+                if (optionsRef.current.onTranscript) {
+                  optionsRef.current.onTranscript({
+                    text: cleanedText,
+                    segments: [newSegment]
+                  });
+                }
+             }
+          }
+          if (type === 'error') {
+            console.error('[Whisper Local] Error:', error);
+            setError(error);
+            setIsModelLoading(false);
+          }
+        };
+        
+        // Load the model in background
+        whisperWorkerRef.current.postMessage({ type: 'load' });
+      } catch (err) {
+        console.warn("Failed to initialize Whisper Web Worker:", err);
+      }
+    }
+    
+    return () => {
+      whisperWorkerRef.current?.terminate();
+    };
   }, []);
 
   // --- Backend Transcription (Legacy/Fallback) ---
@@ -171,43 +208,41 @@ export function useTranscription(options: UseTranscriptionOptions = {}) {
   }, [options]);
 
   // --- Local Fraud Analysis Engine ---
-  const performLocalAnalysis = (text: string) => {
-    // UPDATED: Use the centralized advanced extractor
-    const features = textFeatureExtractor.extract(text);
+  const performLocalAnalysis = async (text: string) => {
+    // UPDATED: Use the advanced DeBERTa ML Model for Live Analysis
+    try {
+      const mlResult = await analyzeTextWithML(text);
+      
+      const score = mlResult.score;
+      const categories: any = {};
+      
+      mlResult.categories.forEach(cat => {
+        categories[cat.toLowerCase()] = { score: mlResult.score, evidence: mlResult.indicators };
+      });
 
-    // Map features to analysis result
-    const categories: any = {};
-    const evidence: string[] = [];
-
-    if (features.financialScore > 0.2) {
-      categories.financial = { score: features.financialScore * 100, evidence: features.financialTerms };
-      evidence.push(...features.financialTerms);
+      return {
+        overallRiskScore: score,
+        riskLevel: mlResult.threatLevel === 'danger' ? 'blocked' : (mlResult.threatLevel === 'warning' ? 'warning' : 'safe'),
+        summary: mlResult.indicators.length > 0
+          ? `Detected risk signals: ${mlResult.indicators.slice(0, 3).join(', ')}`
+          : "No significant threats detected locally.",
+        recommendation: score > 50 ? "Hang up immediately." : "Proceed with caution.",
+        categories,
+        fraudIndicators: mlResult.indicators
+      };
+    } catch (err) {
+      console.warn("ML Analysis failed, falling back to basic rules.", err);
+      // Absolute fallback to rules if ML fails
+      const features = textFeatureExtractor.extract(text);
+      return {
+        overallRiskScore: Math.round(features.textFraudScore * 100),
+        riskLevel: features.textFraudScore >= 0.7 ? 'blocked' : (features.textFraudScore >= 0.4 ? 'warning' : 'safe'),
+        summary: "Analyzed using basic rule engine.",
+        recommendation: "Proceed with caution.",
+        categories: {},
+        fraudIndicators: []
+      };
     }
-    if (features.urgencyScore > 0.3) {
-      categories.urgency = { score: features.urgencyScore * 100, evidence: features.urgencyIndicators };
-      evidence.push(...features.urgencyIndicators);
-    }
-    if (features.threatDensity > 0) {
-      categories.threat = { score: features.threatDensity * 100, evidence: features.threatTerms };
-      evidence.push(...features.threatTerms);
-    }
-    if (features.piiRequestScore > 0) {
-      categories.pii = { score: features.piiRequestScore * 100, evidence: features.piiTypes };
-      evidence.push('PII Requested');
-    }
-
-    const score = Math.round(features.textFraudScore * 100);
-
-    return {
-      overallRiskScore: score,
-      riskLevel: score >= 70 ? 'blocked' : (score >= 40 ? 'warning' : 'safe'),
-      summary: evidence.length > 0
-        ? `Detected risk signals: ${evidence.slice(0, 3).join(', ')}`
-        : "No significant threats detected locally.",
-      recommendation: score > 50 ? "Hang up immediately." : "Proceed with caution.",
-      categories,
-      fraudIndicators: evidence
-    };
   };
 
   // Analyze full call transcript for fraud
@@ -229,11 +264,11 @@ export function useTranscription(options: UseTranscriptionOptions = {}) {
 
       } catch (backendErr) {
         console.warn("Backend analysis failed, using local engine.", backendErr);
-        return performLocalAnalysis(fullTranscript);
+        return await performLocalAnalysis(fullTranscript);
       }
     } catch (err) {
       console.error('[Transcription] Analysis error:', err);
-      return performLocalAnalysis(fullTranscript); // Analysis fail shouldn't stop flow
+      return await performLocalAnalysis(fullTranscript); // Analysis fail shouldn't stop flow
     }
   }, []);
 
@@ -261,12 +296,15 @@ export function useTranscription(options: UseTranscriptionOptions = {}) {
 
   return {
     isTranscribing,
+    isModelLoading,
+    modelProgress,
     transcript,
     segments,
     error,
     processingTime,
     startStreaming, // New
     stopStreaming, // New
+    processAudioChunk, // New
     transcribeAudio,
     analyzeTranscript,
     reset,

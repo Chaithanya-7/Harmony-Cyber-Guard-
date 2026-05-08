@@ -75,6 +75,8 @@ const CallHistory = () => {
 
   const fetchCalls = async () => {
     setIsLoading(true);
+    let supabaseData: CallRecord[] = [];
+    
     try {
       const { data, error } = await supabase
         .from("call_history")
@@ -82,17 +84,21 @@ const CallHistory = () => {
         .order("created_at", { ascending: false });
 
       if (error) throw error;
-
-      setCalls(data as CallRecord[] || []);
+      supabaseData = data as CallRecord[] || [];
     } catch (error: any) {
-      toast({
-        variant: "destructive",
-        title: "Error fetching calls",
-        description: error.message,
-      });
-    } finally {
-      setIsLoading(false);
+      console.warn("Supabase fetch failed, trying local storage fallback", error);
     }
+
+    // Get local storage data
+    const localData = JSON.parse(localStorage.getItem('cyber-guard-history') || '[]');
+    
+    // Merge and sort
+    const allCalls = [...supabaseData, ...localData].sort((a, b) => 
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+
+    setCalls(allCalls);
+    setIsLoading(false);
   };
 
   const filterCalls = () => {

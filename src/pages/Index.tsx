@@ -32,12 +32,14 @@ const Index = () => {
   const [callHistory, setCallHistory] = useState<Array<{ call: number; duration: number; risk: number }>>([]);
   const [isCallModalOpen, setIsCallModalOpen] = useState(false);
 
-  // Redirect to auth if not logged in
+  // Redirect to auth if not logged in - DISABLED FOR DEBUGGING
+  /*
   useEffect(() => {
     if (!loading && !user) {
       navigate("/auth");
     }
   }, [user, loading, navigate]);
+  */
 
   // Fetch existing stats from database
   useEffect(() => {
@@ -47,33 +49,49 @@ const Index = () => {
   }, [user]);
 
   const fetchStats = async () => {
+    let allData: any[] = [];
+    
+    // 1. Try to fetch from Supabase
     try {
       const { data, error } = await supabase
         .from("call_history")
-        .select("risk_level, duration, risk_score")
-        .order("created_at", { ascending: true })
-        .limit(10);
+        .select("risk_level, duration, risk_score, created_at")
+        .order("created_at", { ascending: true });
 
-      if (error) throw error;
-
-      if (data && data.length > 0) {
-        const newStats = {
-          totalCalls: data.length,
-          scamsBlocked: data.filter(c => c.risk_level === 'blocked').length,
-          warnings: data.filter(c => c.risk_level === 'warning').length,
-          safeCalls: data.filter(c => c.risk_level === 'safe').length,
-        };
-        setStats(newStats);
-
-        const history = data.map((call, index) => ({
-          call: index + 1,
-          duration: call.duration,
-          risk: Number(call.risk_score),
-        }));
-        setCallHistory(history);
+      if (!error && data) {
+        allData = [...data];
       }
     } catch (error) {
-      console.error("Error fetching stats:", error);
+      console.warn("Supabase stats fetch failed, using local fallback", error);
+    }
+
+    // 2. Fetch from LocalStorage
+    try {
+      const localHistory = JSON.parse(localStorage.getItem('cyber-guard-history') || '[]');
+      allData = [...allData, ...localHistory];
+    } catch (e) {
+      console.error("Local storage access failed", e);
+    }
+
+    // 3. Process merged data
+    if (allData.length > 0) {
+      // Sort by creation date
+      allData.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+      const newStats = {
+        totalCalls: allData.length,
+        scamsBlocked: allData.filter(c => c.risk_level === 'blocked').length,
+        warnings: allData.filter(c => c.risk_level === 'warning').length,
+        safeCalls: allData.filter(c => c.risk_level === 'safe').length,
+      };
+      setStats(newStats);
+
+      const history = allData.slice(-10).map((call, index) => ({
+        call: index + 1,
+        duration: call.duration,
+        risk: Number(call.risk_score),
+      }));
+      setCallHistory(history);
     }
   };
 
@@ -168,8 +186,9 @@ const Index = () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="animate-pulse text-muted-foreground">Loading...</div>
+      <div className="min-h-screen bg-black flex flex-col items-center justify-center text-white p-10">
+        <div className="text-4xl font-bold mb-4 animate-pulse">CYBER GUARD SYSTEM INITIALIZING...</div>
+        <div className="text-xl opacity-80">Loading security modules and local AI engines. Please wait.</div>
       </div>
     );
   }

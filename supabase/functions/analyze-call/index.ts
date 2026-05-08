@@ -1,9 +1,9 @@
-import "https://deno.land/x/xhr@0.1.0/mod.ts";
-// Deno.serve is now built-in
-
+// Standard Supabase Edge Function CORS Headers
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-region, x-request-id',
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS, PUT',
+  'Access-Control-Max-Age': '86400',
 };
 
 const ANALYSIS_PROMPT = `You are an expert call safety analyst. Analyze the following call transcript for potential threats including fraud, scams, AND cyberbullying/harassment.
@@ -56,12 +56,16 @@ Return a JSON response with:
 Set urgentAction=true if there are direct threats, severe harassment, or immediate danger indicators.`;
 
 Deno.serve(async (req: Request) => {
+  // Handle CORS Preflight
   if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
+    return new Response('ok', { 
+      status: 200, 
+      headers: corsHeaders 
+    });
   }
 
   try {
-    const { transcript, audioAnalysis } = await req.json();
+    const { transcript, audioBase64, audioAnalysis } = await req.json();
 
     console.log('[AnalyzeCall] Received request, transcript length:', transcript?.length || 0);
 
@@ -82,7 +86,6 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    // Try Lovable AI first, fallback to OpenAI
     const lovableKey = Deno.env.get('LOVABLE_API_KEY');
     const openaiKey = Deno.env.get('OPENAI_API_KEY');
 
@@ -92,144 +95,72 @@ Deno.serve(async (req: Request) => {
 
     console.log('[AnalyzeCall] Analyzing transcript for fraud and cyberbullying...');
 
-    // Build context with audio analysis if available
-    let analysisContext = `TRANSCRIPT TO ANALYZE:\n"${transcript}"`;
-
-    if (audioAnalysis) {
-      analysisContext += `\n\nAUDIO CONTEXT:
-- Voice Stress Level: ${((audioAnalysis.voiceStress || 0) * 100).toFixed(1)}%
-- Speech Rate: ${audioAnalysis.speechRate ? 'Elevated' : 'Normal'}
-- Emotional Trend: ${audioAnalysis.emotionalTrend || 'stable'}
-- Speakers Detected: ${audioAnalysis.speakerCount || 'unknown'}`;
+    // 1. Try Dedicated ML Inference Service (Deep Path)
+    const mlInferenceUrl = Deno.env.get('ML_INFERENCE_URL');
+    if (mlInferenceUrl) {
+      try {
+        console.log('[AnalyzeCall] Calling external ML inference service...');
+        const mlResponse = await fetch(`${mlInferenceUrl}/analyze/call`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ transcript, audioBase64, audioAnalysis })
+        });
+        
+        if (mlResponse.ok) {
+          const result = await mlResponse.json();
+          return new Response(JSON.stringify(result), { 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+      } catch (err) {
+        console.warn('[AnalyzeCall] ML Service failed, falling back to LLM:', err);
+      }
     }
 
     let analysis;
+    const llmAnalysisContext = `TRANSCRIPT: "${transcript}"\nAUDIO: ${JSON.stringify(audioAnalysis)}`;
 
-    // Use Lovable AI if available
-    if (lovableKey) {
-      console.log('[AnalyzeCall] Using Lovable AI gateway...');
-
-      const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+    try {
+      const response = await fetch(lovableKey ? 'https://ai.gateway.lovable.dev/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${lovableKey}`,
+          'Authorization': `Bearer ${lovableKey || openaiKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'google/gemini-2.5-flash',
+          model: lovableKey ? 'google/gemini-2.5-flash' : 'gpt-4o-mini',
           messages: [
             { role: 'system', content: ANALYSIS_PROMPT },
-            { role: 'user', content: analysisContext }
+            { role: 'user', content: llmAnalysisContext }
           ],
-        }),
-      });
-
-      if (!response.ok) {
-        const status = response.status;
-        console.error('[AnalyzeCall] Lovable AI error:', status);
-
-        if (status === 429) {
-          return new Response(
-            JSON.stringify({ error: 'Rate limit exceeded. Please try again.' }),
-            { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
-        }
-        if (status === 402) {
-          return new Response(
-            JSON.stringify({ error: 'AI credits exhausted.' }),
-            { status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-          );
-        }
-
-        // Fallback to OpenAI if Lovable fails
-        if (openaiKey) {
-          console.log('[AnalyzeCall] Falling back to OpenAI...');
-          const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${openaiKey}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              model: 'gpt-4o-mini',
-              messages: [
-                { role: 'system', content: ANALYSIS_PROMPT },
-                { role: 'user', content: analysisContext }
-              ],
-              temperature: 0.3,
-              response_format: { type: 'json_object' },
-            }),
-          });
-
-          if (!openaiResponse.ok) {
-            throw new Error('Both AI services failed');
-          }
-
-          const result = await openaiResponse.json();
-          analysis = JSON.parse(result.choices[0].message.content);
-        } else {
-          throw new Error('Lovable AI failed and no OpenAI fallback');
-        }
-      } else {
-        const result = await response.json();
-        const content = result.choices?.[0]?.message?.content || '';
-
-        // Parse JSON from response
-        try {
-          const jsonMatch = content.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            analysis = JSON.parse(jsonMatch[0]);
-          } else {
-            throw new Error('No JSON in response');
-          }
-        } catch (parseErr) {
-          console.error('[AnalyzeCall] Parse error:', parseErr);
-          // Create a basic analysis from the response
-          analysis = {
-            overallRiskScore: 50,
-            riskLevel: 'warning',
-            categories: {},
-            fraudIndicators: ['Analysis parsing failed - manual review recommended'],
-            harmfulContent: [],
-            summary: content.substring(0, 200),
-            recommendation: 'Manual review recommended',
-            urgentAction: false
-          };
-        }
-      }
-    } else {
-      // Use OpenAI directly
-      console.log('[AnalyzeCall] Using OpenAI...');
-
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openaiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: ANALYSIS_PROMPT },
-            { role: 'user', content: analysisContext }
-          ],
-          temperature: 0.3,
           response_format: { type: 'json_object' },
         }),
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('[AnalyzeCall] OpenAI API error:', errorText);
-        throw new Error(`OpenAI API error: ${errorText}`);
-      }
-
       const result = await response.json();
-      analysis = JSON.parse(result.choices[0].message.content);
-    }
+      const content = result.choices?.[0]?.message?.content || '{}';
+      const rawAnalysis = JSON.parse(content);
 
-    console.log('[AnalyzeCall] Analysis complete. Risk:', analysis.riskLevel, 'Score:', analysis.overallRiskScore);
-    console.log('[AnalyzeCall] Harmful content found:', analysis.harmfulContent?.length || 0);
+      // Map LLM response to unified MLResponse format
+      analysis = {
+        riskScore: rawAnalysis.overallRiskScore,
+        riskLevel: rawAnalysis.riskLevel === 'blocked' ? 'danger' : rawAnalysis.riskLevel,
+        confidence: 0.85,
+        signals: (rawAnalysis.fraudIndicators || []).map((label: string) => ({
+          id: 'llm_signal',
+          label,
+          probability: 0.9
+        })),
+        categories: Object.keys(rawAnalysis.categories || {}).filter(k => rawAnalysis.categories[k].score > 30),
+        explanation: rawAnalysis.summary,
+        recommendedAction: rawAnalysis.recommendation,
+        isHeuristicFallback: false,
+        processingTimeMs: 0,
+      };
+    } catch (err) {
+      console.error('[AnalyzeCall] LLM analysis failed:', err);
+      throw err;
+    }
 
     return new Response(
       JSON.stringify(analysis),

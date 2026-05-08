@@ -41,6 +41,7 @@ export interface TextFeatures {
 
   // Overall fraud likelihood from text
   textFraudScore: number;
+  threatPhrases: string[];
 }
 
 interface NGramScore {
@@ -52,11 +53,11 @@ interface NGramScore {
 export class TextFeatureExtractor {
   // Authority claim patterns
   private authorityPatterns: RegExp[] = [
-    /\b(i am|this is|i'm calling from)\s+(the\s+)?(irs|fbi|police|government|department|agency|bank|microsoft|apple|amazon|social security|medicare)/i,
-    /\b(official|authorized|certified|licensed|government|federal)\s+(agent|officer|representative|department)/i,
-    /\bwe\s+(have|need)\s+(your|the)\s+(information|records|file|case)/i,
-    /\b(badge\s+number|case\s+number|reference\s+number|warrant)/i,
-    /\byour\s+(account|case|file)\s+(has been|is being|will be)/i,
+    /\b(i am|this is|i'm calling from)\s+(the\s+)?(irs|fbi|police|government|department|agency|bank|microsoft|apple|amazon|social security|medicare|well\s+fargo|chase|boa|citibank)\b/i,
+    /\b(official|authorized|certified|licensed|government|federal)\s+(agent|officer|representative|department)\b/i,
+    /\bwe\s+(have|need)\s+(your|the)\s+(information|records|file|case|account\s+details)\b/i,
+    /\b(badge\s+number|case\s+number|reference\s+number|warrant|account\s+verification)\b/i,
+    /\byour\s+(account|case|file|security|access)\s+(has\s+been|is\s+being|will\s+be|was)\b/i,
   ];
 
   // Financial Request patterns (NEW - Catch "give me the money")
@@ -64,6 +65,8 @@ export class TextFeatureExtractor {
     /\b(money|cash|dollars|funds|payment|wire|transfer)\b/i,
     /\b(venmo|zelle|paypal|cashapp|western\s+union|moneygram)\b/i,
     /\b(bitcoin|crypto|ethereum|wallet\s+address)\b/i,
+    /\b(won|winner|prize|reward|claim|inheritance|jackpot)\b/i,
+    /\b(lottery|casino|betting|gamble)\b/i,
     /\b(give|send|pay|transfer)\s+(me\s+)?(the\s+)?(money|cash|dollars|funds)/i,
     /\b(how\s+much|amount)\s+(do\s+you|can\s+you)\s+(have|send|pay)/i,
     /\b(\$|usd|dollars)\s*\d+/i,
@@ -118,28 +121,32 @@ export class TextFeatureExtractor {
   // Cyberbullying and harassment patterns
   private cyberbullyingPatterns: RegExp[] = [
     // Direct insults and name-calling
-    /\b(idiot|stupid|dumb|loser|pathetic|worthless|ugly|fat|disgusting|trash|garbage|moron|retard)/i,
+    /\b(idiot|stupid|dumb|loser|pathetic|worthless|ugly|fat|disgusting|trash|garbage|moron|retard|clown|scum|rat|pig|freak)\b/i,
     // Profanity and vulgar insults
-    /\b(f+u+c+k+|sh+i+t+|b+i+t+c+h+|a+s+s+h+o+l+e+|d+a+m+n+|hell|crap|bastard|dick|pussy)/i,
-    // Threats
-    /\b(kill|murder|die|hurt|beat|punch|attack|destroy)\s+(you|yourself)/i,
-    /\b(i('ll|'m going to|will)|we('ll| will))\s+(kill|hurt|beat|destroy|attack)/i,
-    /\b(you should|go)\s+(die|kill yourself)/i,
-    // Harassment phrases
-    /\b(nobody likes you|everyone hates you|no one cares|you('re| are) nothing)/i,
-    /\b(shut (the fuck )?up|go away|leave me alone)/i,
-    /\b(i hate you|you('re| are) so (stupid|ugly|fat|dumb|worthless))/i,
-    // Stalking language
-    /\b(i('m| am) watching you|i know where you live|i('ll| will) find you)/i,
+    /\b(f+u+c+k+|sh+i+t+|b+i+t+c+h+|a+s+s+h+o+l+e+|d+a+m+n+|hell|crap|bastard|dick|pussy|slut|whore|motherfucker)\b/i,
+    // Aggressive Threats
+    /\b(kill|murder|die|hurt|beat|punch|attack|destroy|strangle|shoot|stab|choke|burn)\s+(you|yourself|your)/i,
+    /\b(i('ll|'m going to|will)|we('ll| will))\s+(kill|hurt|beat|destroy|attack|end|ruin|get)\s+you/i,
+    /\b(you should|go)\s+(die|kill yourself|hang yourself|jump)\b/i,
+    // Harassment and Emotional Abuse
+    /\b(nobody likes you|everyone hates you|no one cares|you('re| are) nothing|you are a mistake|you should not exist)\b/i,
+    /\b(shut (the fuck )?up|go away|leave me alone|fuck off|get lost|piece of shit)\b/i,
+    /\b(i hate you|you('re| are) so (stupid|ugly|fat|dumb|worthless|disgusting))\b/i,
+    // Stalking and Doxing Threats
+    /\b(i('m| am) watching you|i know where you live|i('ll| will) find you|i am outside|your address is)\b/i,
+    /\b(i will track you|i have your IP|i know your school|i know your family)\b/i,
     // Sexual harassment
-    /\b(send (me )?nudes|show me your|touch (yourself|your))/i,
+    /\b(send (me )?nudes|show me your|touch (yourself|your)|naked|sexy|horny|want some)\b/i,
     // Intimidation
-    /\b(you('ll| will) (regret|pay|be sorry)|watch your back)/i,
-    /\b(i('ll| will) make (you|your life))/i,
-    // Racial/ethnic slurs (partial list - common patterns)
-    /\b(n+i+g+g+|ch+i+n+k+|sp+i+c+|k+i+k+e+|w+e+t+b+a+c+k+)/i,
-    // Ableist language
-    /\b(retard(ed)?|cripple|spaz|lame)/i,
+    /\b(you('ll| will) (regret|pay|be sorry)|watch your back|don't tell anyone|or else)\b/i,
+    /\b(i('ll| will) (leak|share|post|expose|upload) your (photos|videos|nudes|address))\b/i,
+    // Realistic Scam Scenarios (NEW)
+    /\b(it's\s+your\s+grandson|i'm\s+your\s+grandchild|it's\s+me\s+grandma|i'm\s+in\s+jail|i'm\s+in\s+trouble)\b/i,
+    /\b(electricity|water|gas|utility|power)\s+(will\s+be|is\s+being)\s+(cut\s+off|disconnected|shut\s+down)\b/i,
+    /\b(gift\s+card|apple\s+card|steam\s+card|target\s+card|buy\s+a\s+card)\b/i,
+    /\b(one-time\s+passcode|otp|verification\s+code|don't\s+share\s+this)\b/i,
+    // Racial/ethnic/hate speech
+    /\b(n+i+g+g+|ch+i+n+k+|sp+i+c+|k+i+k+e+|w+e+t+b+a+c+k+|terrorist|faggot|tranny)\b/i,
   ];
 
   // Threat bigrams for scoring
@@ -200,6 +207,16 @@ export class TextFeatureExtractor {
       cyberbullyingScore: cyberbullyingResult.score,
     });
 
+    // Collect all unique threat phrases for highlighting
+    const threatPhrases = [...new Set([
+      ...authorityResult.phrases,
+      ...urgencyResult.indicators,
+      ...threatResult.terms,
+      ...financialResult.terms,
+      ...piiResult.types,
+      ...cyberbullyingResult.indicators,
+    ])];
+
     return {
       authorityScore: authorityResult.score,
       authorityPhrases: authorityResult.phrases,
@@ -207,6 +224,8 @@ export class TextFeatureExtractor {
       urgencyIndicators: urgencyResult.indicators,
       threatDensity: threatResult.density,
       threatTerms: threatResult.terms,
+      financialScore: financialResult.score, // ADDED
+      financialTerms: financialResult.terms, // ADDED
       piiRequestScore: piiResult.score,
       piiTypes: piiResult.types,
       imperativeFrequency: imperativeResult.frequency,
@@ -220,6 +239,7 @@ export class TextFeatureExtractor {
       bigramThreatScore,
       trigramPatternScore,
       textFraudScore,
+      threatPhrases,
     };
   }
 
@@ -447,30 +467,27 @@ export class TextFeatureExtractor {
     questionFrequency: number;
     cyberbullyingScore?: number;
   }): number {
-    // Weighted combination of features
-    const weights = {
-      authority: 0.12,
-      urgency: 0.12,
-      threat: 0.15,
-      financial: 0.25, // NEW: High weight
-      pii: 0.2,
-      imperative: 0.05,
-      bigram: 0.08,
-      trigram: 0.08,
-      cyberbullying: 0.2, // High weight for harassment detection
-    };
-
     let score =
-      features.authorityScore * weights.authority +
-      features.urgencyScore * weights.urgency +
-      features.threatDensity * weights.threat +
-      features.financialScore * weights.financial + // NEW
-      features.piiRequestScore * weights.pii +
-      features.imperativeFrequency * weights.imperative +
-      features.bigramThreatScore * weights.bigram +
-      features.trigramPatternScore * weights.trigram +
-      (features.cyberbullyingScore || 0) * weights.cyberbullying;
+      features.authorityScore * 0.15 +
+      features.urgencyScore * 0.15 +
+      features.threatDensity * 0.2 +
+      features.financialScore * 0.4 +
+      features.piiRequestScore * 0.3 +
+      features.imperativeFrequency * 0.1 +
+      features.bigramThreatScore * 0.1 +
+      features.trigramPatternScore * 0.1 +
+      (features.cyberbullyingScore || 0) * 0.4;
 
+    if ((features.cyberbullyingScore || 0) > 0.4) {
+      return Math.max(0.88, (features.cyberbullyingScore || 0));
+    }
+
+    // SCAM ZERO-TOLERANCE: If clear financial scam keywords are detected, ensure it hits at least Warning level
+    if (features.financialScore > 0.3) {
+      score = Math.max(score, features.financialScore);
+    }
+
+    // Weighted combination of features
     // --- NEW: Contextual Combination Boost ---
     // Detects when multiple related threat vectors align (e.g., Urgency + Financial + Imperative)
     // This improves accuracy by focusing on the *combination* of behaviors rather than just keywords.

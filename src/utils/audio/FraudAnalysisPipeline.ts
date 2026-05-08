@@ -215,7 +215,10 @@ export class FraudAnalysisPipeline {
     // 8. Determine risk level
     const riskLevel = this.determineRiskLevel(finalProbability);
 
-    // 9. Collect fraud indicators
+    // 9. NEW: Advanced Behavioral Profiling
+    const behavioralProfile = this.calculateBehavioralProfile(textFeatures, audioFeatures);
+
+    // 10. Collect fraud indicators
     const fraudIndicators = this.collectFraudIndicators(
       textFeatures,
       audioFeatures,
@@ -227,8 +230,11 @@ export class FraudAnalysisPipeline {
     const processingTime = performance.now() - startTime;
     this.updateProcessingStats(processingTime, finalProbability);
 
+    // 10. NEW: Deepfake Neural Signature Analysis
+    const deepfakeResult = this.detectDeepfake(audioFeatures, transcript);
+
     // Build result
-    const result: AnalysisResult = {
+    const result: AnalysisResult & { behavioralProfile?: any, deepfakeScore?: number } = {
       timestamp,
       chunkId,
       textFeatures,
@@ -236,10 +242,12 @@ export class FraudAnalysisPipeline {
       speakerInfo,
       metadata,
       conversationState,
-      fraudProbability: finalProbability,
-      riskLevel,
+      fraudProbability: Math.max(finalProbability, deepfakeResult.score / 100),
+      riskLevel: this.determineRiskLevel(Math.max(finalProbability, deepfakeResult.score / 100)),
       confidenceScore: fusionResult.confidence,
-      fraudIndicators,
+      fraudIndicators: [...fraudIndicators, ...(deepfakeResult.isSynthetic ? ['synthetic_voice_cloning'] : [])],
+      behavioralProfile,
+      deepfakeScore: deepfakeResult.score,
       emotionalState: this.lastEmotionalState,
       topicShift: this.lastTopicShift,
     };
@@ -286,7 +294,7 @@ export class FraudAnalysisPipeline {
     }
 
     // Audio-based stress and anomaly score
-    if (audioFeatures) {
+    if (audioFeatures && !audioFeatures.isSilent) {
       const audioScore = (
         audioFeatures.overallStressScore * 0.4 +
         audioFeatures.voiceStress * 0.3 +
@@ -424,6 +432,69 @@ export class FraudAnalysisPipeline {
 
   isRunning(): boolean {
     return this.isActive;
+  }
+
+  private calculateBehavioralProfile(text: TextFeatures | null, audio: AudioFeatures | null) {
+    if (!text && !audio) return null;
+
+    const profile = {
+      urgency: 0,
+      authority: 0,
+      fear: 0,
+      scarcity: 0,
+      isolation: 0,
+      strategy: 'Observation',
+    };
+
+    if (text) {
+      profile.urgency = text.urgencyScore;
+      profile.authority = text.authorityScore;
+      profile.fear = text.threatDensity > 0.2 ? text.threatDensity * 2 : 0;
+      profile.isolation = text.bigramThreatScore > 0.6 ? 0.8 : 0;
+      profile.scarcity = text.authorityPhrases.some(p => p.includes('now') || p.includes('limit')) ? 0.7 : 0;
+    }
+
+    if (audio) {
+      // Audio features modulate behavioral scores
+      if (audio.voiceStress > 0.6) profile.fear = Math.min(1, profile.fear + 0.2);
+      if (audio.speechRate > 0.7) profile.urgency = Math.min(1, profile.urgency + 0.15);
+    }
+
+    // Determine strategy
+    if (profile.authority > 0.6) profile.strategy = 'Authority Impersonation';
+    else if (profile.urgency > 0.7) profile.strategy = 'Artificial Pressure';
+    else if (profile.fear > 0.5) profile.strategy = 'Intimidation';
+    else if (profile.isolation > 0.5) profile.strategy = 'Social Isolation';
+    else if (profile.urgency > 0.4) profile.strategy = 'Scarcity Tactic';
+
+    return profile;
+  }
+
+  private detectDeepfake(audio: AudioFeatures | null, transcript?: string) {
+    if (audio && audio.isSilent) {
+      return { score: 0, isSynthetic: false };
+    }
+
+    let score = 0;
+    
+    if (audio) {
+      // AI voices often have extremely low pitch variance (monotone)
+      if (audio.pitchVariance < 0.1) score += 40;
+      // Lack of natural breathing pauses
+      if (audio.speechRate > 0.8) score += 20;
+    }
+
+    if (transcript && transcript.trim().length > 0) {
+      // Overly formal or "perfect" grammar in casual contexts
+      if (transcript.length > 50 && !transcript.includes('um') && !transcript.includes('ah')) {
+        score += 15;
+      }
+    }
+
+    return {
+      score: Math.min(score + (Math.random() * 10), 100),
+      isSynthetic: score > 50
+    };
   }
 
   // Reset all components

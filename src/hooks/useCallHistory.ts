@@ -19,12 +19,37 @@ export function useCallHistory() {
 
   const saveCall = useCallback(async (callData: CallData, userEmail?: string) => {
     setIsSaving(true);
+    
+    // Create local record for offline mode
+    const localRecord = {
+      id: crypto.randomUUID(),
+      user_id: 'local-user',
+      duration: callData.duration,
+      risk_level: callData.riskLevel,
+      risk_score: callData.riskScore,
+      fraud_indicators: callData.fraudIndicators,
+      scenario_type: callData.scenarioType || 'Manual Analysis',
+      caller_id: callData.callerId || 'Live Session',
+      transcript: callData.transcript || null,
+      audio_analysis: callData.audioAnalysis || null,
+      created_at: new Date().toISOString(),
+    };
+
+    // Save to localStorage
+    try {
+      const existingHistory = JSON.parse(localStorage.getItem('cyber-guard-history') || '[]');
+      localStorage.setItem('cyber-guard-history', JSON.stringify([localRecord, ...existingHistory]));
+      console.log("[LocalHistory] Saved session to storage.");
+    } catch (e) {
+      console.error("Failed to save to local storage", e);
+    }
+
     try {
       const { data: { user } } = await supabase.auth.getUser();
       
       if (!user) {
-        console.log("User not authenticated, skipping save");
-        return null;
+        console.log("User not authenticated, skipping Supabase save. Data persisted locally.");
+        return localRecord;
       }
 
       const { data: callRecord, error: callError } = await supabase
@@ -83,13 +108,9 @@ export function useCallHistory() {
 
       return callRecord;
     } catch (error: unknown) {
-      console.error("Error saving call:", error);
-      toast({
-        variant: "destructive",
-        title: "Error",
-        description: "Failed to save call data.",
-      });
-      return null;
+      console.error("Supabase Error:", error);
+      // Don't show toast error if we have local fallback
+      return localRecord;
     } finally {
       setIsSaving(false);
     }

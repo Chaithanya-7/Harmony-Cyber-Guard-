@@ -24,6 +24,7 @@ export interface AudioAnalysisState {
   speakers: SpeakerProfile[];
   metadata: AggregatedMetadata | null;
   emotionalTrend: 'escalating' | 'de-escalating' | 'stable';
+  behavioralProfile: any | null;
 }
 
 export function useAudioAnalysis(options: UseAudioAnalysisOptions = {}) {
@@ -43,6 +44,7 @@ export function useAudioAnalysis(options: UseAudioAnalysisOptions = {}) {
     speakers: [],
     metadata: null,
     emotionalTrend: 'stable',
+    behavioralProfile: null,
   });
 
   // Initialize pipeline
@@ -66,6 +68,7 @@ export function useAudioAnalysis(options: UseAudioAnalysisOptions = {}) {
         speakers: diarizationResult ? Array.from(diarizationResult.speakers.values()) : [],
         metadata: result.metadata,
         emotionalTrend,
+        behavioralProfile: (result as any).behavioralProfile || null,
       }));
     });
 
@@ -134,6 +137,7 @@ export function useAudioAnalysis(options: UseAudioAnalysisOptions = {}) {
         speakers: [],
         metadata: null,
         emotionalTrend: 'stable',
+        behavioralProfile: null,
       });
     }
   }, []);

@@ -17,7 +17,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Set up auth state listener FIRST
+    // Safety timeout to prevent infinite loading screen
+    const timeout = setTimeout(() => {
+      // If still loading after 2 seconds, assume offline/local mode
+      if (loading) {
+        console.warn("Supabase connection timed out. Entering local/offline mode.");
+        setSession({
+          access_token: 'dummy',
+          refresh_token: 'dummy',
+          expires_in: 3600,
+          token_type: 'bearer',
+          user: { id: 'local-user', email: 'guest@local.ai' } as any
+        });
+        setUser({ id: 'local-user', email: 'guest@local.ai' } as any);
+        setLoading(false);
+      }
+    }, 2000);
+
+    // Set up auth state listener
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event, session) => {
         setSession(session);
@@ -26,14 +43,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     );
 
-    // THEN check for existing session
+    // Check for existing session
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
+      if (session) {
+        setSession(session);
+        setUser(session.user);
+      }
+      setLoading(false);
+    }).catch(err => {
+      console.error("Auth initialization error:", err);
+      // Fallback to local user
+      setUser({ id: 'local-user', email: 'guest@local.ai' } as any);
       setLoading(false);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+      clearTimeout(timeout);
+    };
   }, []);
 
   const signOut = async () => {

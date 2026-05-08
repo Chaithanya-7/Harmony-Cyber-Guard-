@@ -7,6 +7,7 @@ import { Progress } from '@/components/ui/progress';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { AudioAnalysisPanel } from './AudioAnalysisPanel';
+import { AdvancedBehavioralDashboard } from './AdvancedBehavioralDashboard';
 import { useLiveAnalysis } from '@/hooks/useLiveAnalysis';
 import { useCallRecording } from '@/hooks/useCallRecording';
 import { useTranscription } from '@/hooks/useTranscription';
@@ -41,6 +42,7 @@ interface LiveAnalysisViewProps {
     fraudIndicators: string[];
     transcript?: string;
     recordingUrl?: string;
+    audioAnalysis?: any;
   }) => void;
 }
 
@@ -48,219 +50,156 @@ export function LiveAnalysisView({ onCallEnd }: LiveAnalysisViewProps) {
   const navigate = useNavigate();
   const [callDuration, setCallDuration] = useState(0);
   const [peakRisk, setPeakRisk] = useState(0);
-  const [allIndicators, setAllIndicators] = useState<string[]>([]);
-  const [isAnalyzingTranscript, setIsAnalyzingTranscript] = useState(false);
-  const [aiAnalysis, setAiAnalysis] = useState<Record<string, unknown> | null>(null);
   const [activeTab, setActiveTab] = useState('realtime');
-  const [lastCallId, setLastCallId] = useState<string | null>(null);
-
-  const audioChunksRef = useRef<Blob[]>([]);
-  const transcriptionQueueRef = useRef<string[]>([]);
-  const lastTranscriptionTimeRef = useRef(0);
+  const [isAnalyzingTranscript, setIsAnalyzingTranscript] = useState(false);
+  const [aiAnalysis, setAiAnalysis] = useState<any>(null);
+  
+  // Audio Level and Status Refs
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
   const lastNotificationRiskRef = useRef(0);
-
-  // Push notifications hook
   const pushNotifications = usePushNotifications();
 
-  // Initialize hooks
+  // Initialize Transcription service (Local Whisper)
+  const transcription = useTranscription();
+  
+  // Initialize Analysis Pipeline (ML Engine)
   const liveAnalysis = useLiveAnalysis({
-    fraudThreshold: 0.7,
-    enableDiarization: true,
-    onAlert: (result) => {
-      toast({
-        title: "⚠️ Fraud Alert!",
-        description: `High risk detected: ${(result.fraudProbability * 100).toFixed(0)}%`,
-        variant: "destructive",
-      });
-
-      // Send push notification for high-risk alerts
-      const riskLevel = result.fraudProbability >= 0.8 ? 'blocked' : 'warning';
+    onRawAudioChunk: (chunk) => {
+      transcription.processAudioChunk(chunk);
+    },
+    onResult: (result) => {
+      // Trigger critical notification for high risk
       if (result.fraudProbability >= 0.5 && result.fraudProbability > lastNotificationRiskRef.current + 0.1) {
         lastNotificationRiskRef.current = result.fraudProbability;
-        pushNotifications.sendFraudAlert(
-          riskLevel,
-          result.fraudProbability * 100,
-          result.fraudIndicators,
-          () => {
-            // Navigate to call details when notification is clicked
-            if (lastCallId) {
-              navigate(`/call/${lastCallId}`);
-            }
-          }
-        );
+        pushNotifications.sendNotification({
+          title: "Fraud Alert: High Risk Detected",
+          body: `Confidence: ${(result.fraudProbability * 100).toFixed(0)}%. ${result.fraudIndicators[0] || 'Unusual behavior detected.'}`,
+          tag: 'fraud-alert',
+        });
       }
-    },
-    onChunkProcessed: (result) => {
-      if (result.fraudProbability > peakRisk) {
-        setPeakRisk(result.fraudProbability);
-      }
-      if (result.fraudIndicators.length > 0) {
-        setAllIndicators(prev => [...new Set([...prev, ...result.fraudIndicators])]);
-      }
-    },
+    }
   });
 
-  const recording = useCallRecording();
-  const transcription = useTranscription({
-    onTranscript: (result) => {
-      // Update the live analysis with transcript for text feature extraction
-      if (result.text) {
-        liveAnalysis.updateTranscript(result.text);
-      }
-    },
-  });
-
-  // Call duration timer
+  // Track Peak Risk from both Heuristics and ML
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    const currentHeuristicRisk = liveAnalysis.currentResult?.fraudProbability || 0;
+    const currentMLRisk = (liveAnalysis.mlResult?.riskScore || 0) / 100;
+    const maxRisk = Math.max(currentHeuristicRisk, currentMLRisk);
+    
+    if (maxRisk > peakRisk) {
+      setPeakRisk(maxRisk);
+    }
+  }, [liveAnalysis.currentResult, liveAnalysis.mlResult, peakRisk]);
+
+  // Initialize Recording service
+  const recording = useCallRecording();
+
+  // Sync transcription to analysis engine
+  useEffect(() => {
+    if (transcription.transcript) {
+      liveAnalysis.updateTranscript(transcription.transcript);
+    }
+  }, [transcription.transcript, liveAnalysis]);
+
+  // Duration Timer
+  useEffect(() => {
     if (liveAnalysis.isRecording) {
-      interval = setInterval(() => {
+      timerRef.current = setInterval(() => {
         setCallDuration(prev => prev + 1);
       }, 1000);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
     }
     return () => {
-      if (interval) clearInterval(interval);
+      if (timerRef.current) clearInterval(timerRef.current);
     };
   }, [liveAnalysis.isRecording]);
 
-  // No interval needed for streaming transcription
-  // Only use periodic sync if we want to save audio chunks, but streaming text is handled by startStreaming()
-  useEffect(() => {
-    // Optional: We can still monitor recording health here
-  }, [liveAnalysis.isRecording]);
-
-
   const handleStart = async () => {
-    if (!liveAnalysis.isPermissionGranted) {
-      const granted = await liveAnalysis.requestPermission();
-      if (!granted) {
-        toast({
-          title: "Microphone Access Required",
-          description: "Please allow microphone access to use live analysis.",
-          variant: "destructive",
-        });
-        return;
-      }
+    try {
+      // Start all pipelines
+      await liveAnalysis.start();
+      await transcription.startStreaming();
+      await recording.startRecording();
+      
+      setCallDuration(0);
+      setPeakRisk(0);
+      lastNotificationRiskRef.current = 0;
+      setAiAnalysis(null);
+      
+      toast({
+        title: "Analysis Started",
+        description: "Real-time fraud detection is active.",
+      });
+    } catch (err) {
+      toast({
+        variant: "destructive",
+        title: "Initialization Failed",
+        description: err instanceof Error ? err.message : "Could not access audio devices.",
+      });
     }
-
-    // Request notification permission if not already granted
-    if (pushNotifications.permission === 'default') {
-      await pushNotifications.requestPermission();
-    }
-
-    // Reset state
-    setCallDuration(0);
-    setPeakRisk(0);
-    setAllIndicators([]);
-    setAiAnalysis(null);
-    setLastCallId(null);
-    audioChunksRef.current = [];
-    lastTranscriptionTimeRef.current = Date.now();
-    lastNotificationRiskRef.current = 0;
-    transcription.reset();
-
-    // Start recording and analysis
-    await Promise.all([
-      liveAnalysis.start(),
-      recording.startRecording(),
-    ]);
-
-    // Start Real-Time Transcription
-    transcription.startStreaming();
-
-    toast({
-      title: "Live Analysis Started",
-      description: "Recording and monitoring audio for fraud signals...",
-    });
   };
 
   const handleStop = async () => {
-    // Stop recording and analysis
+    // Stop all pipelines
     liveAnalysis.stop();
     transcription.stopStreaming();
-
     const recordingResult = await recording.stopRecording();
-
-    // Get final transcript
-    let finalTranscript = transcription.getFullTranscript();
-
-    // If we have a recording, do final transcription
-    if (recordingResult && recordingResult.blob.size > 0) {
-      toast({
-        title: "Processing...",
-        description: "Transcribing and analyzing call...",
-      });
-
+    
+    let finalAiAnalysis = null;
+    
+    // Final analysis of the full transcript
+    if (transcription.transcript) {
       setIsAnalyzingTranscript(true);
-
       try {
-        // Final transcription
-        const base64 = await recording.blobToBase64(recordingResult.blob);
-        const transcriptResult = await transcription.transcribeAudio(base64);
-
-        if (transcriptResult?.text) {
-          finalTranscript = transcriptResult.text;
-        }
-
-        // AI analysis of transcript
-        if (finalTranscript) {
-          const analysis = await transcription.analyzeTranscript(finalTranscript, {
-            voiceStress: liveAnalysis.currentResult?.audioFeatures?.voiceStress || 0,
-            speechRate: liveAnalysis.currentResult?.audioFeatures?.speechRate || 0,
-            emotionalTrend: liveAnalysis.emotionalTrend,
-            speakerCount: liveAnalysis.speakers.length,
-          });
-
-          if (analysis) {
-            setAiAnalysis(analysis);
-
-            // Update peak risk if AI analysis found higher risk
-            const aiRisk = (analysis.overallRiskScore as number) / 100;
-            if (aiRisk > peakRisk) {
-              setPeakRisk(aiRisk);
-            }
-          }
-        }
-
-        // Upload recording
-        const uploadResult = await recording.uploadRecording(recordingResult.blob);
-
-        if (uploadResult) {
-          toast({
-            title: "Recording Saved",
-            description: "Call recording uploaded successfully.",
-          });
-        }
-
-        // Calculate final risk level
-        const riskLevel = peakRisk >= 0.8 ? 'blocked' : peakRisk >= 0.5 ? 'warning' : 'safe';
-
-        if (onCallEnd) {
-          onCallEnd({
-            duration: callDuration,
-            riskLevel,
-            riskScore: Math.round(peakRisk * 100),
-            fraudIndicators: allIndicators,
-            transcript: finalTranscript,
-            recordingUrl: uploadResult?.path,
-          });
-        }
-
-        toast({
-          title: "Analysis Complete",
-          description: `Call ended. Risk level: ${riskLevel}`,
-        });
+        finalAiAnalysis = await transcription.analyzeTranscript(transcription.transcript);
+        setAiAnalysis(finalAiAnalysis);
+        setActiveTab('ai-analysis');
       } catch (err) {
-        console.error('Error processing call:', err);
-        toast({
-          title: "Processing Error",
-          description: "Some analysis features failed. Basic results saved.",
-          variant: "destructive",
-        });
+        console.error("Final analysis failed:", err);
       } finally {
         setIsAnalyzingTranscript(false);
       }
     }
+
+    if (onCallEnd) {
+      const finalTranscript = transcription.transcript || liveAnalysis.transcript;
+      onCallEnd({
+        duration: callDuration,
+        riskLevel: peakRisk >= 0.8 ? 'blocked' : peakRisk >= 0.5 ? 'warning' : 'safe',
+        riskScore: Math.round(peakRisk * 100),
+        fraudIndicators: [...(liveAnalysis.currentResult?.fraudIndicators || []), ...(finalAiAnalysis?.fraudIndicators || [])],
+        transcript: finalTranscript,
+        recordingUrl: recordingResult?.url,
+        audioAnalysis: {
+          summary: finalAiAnalysis?.summary || "Live forensic analysis completed.",
+          recommendation: peakRisk >= 0.8 ? "CRITICAL: Scammer patterns detected. Block immediately." : "Activity monitored.",
+          categories: [
+            { name: 'Urgency', score: (finalAiAnalysis?.urgencyScore || 0) * 100, indicators: [] },
+            { name: 'Authority', score: (liveAnalysis.behavioralProfile?.authority || 0) * 100, indicators: [] }
+          ]
+        }
+      });
+    }
+  };
+
+  const renderHighlightedText = (text: string) => {
+    const threatPhrases = liveAnalysis.currentResult?.textFeatures?.threatPhrases || [];
+    if (threatPhrases.length === 0) return text;
+
+    // Create a regex to match any of the threat phrases
+    const pattern = new RegExp(`(${threatPhrases.map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi');
+    const parts = text.split(pattern);
+
+    return parts.map((part, i) => 
+      pattern.test(part) ? (
+        <span key={i} className="bg-destructive/20 text-destructive font-bold px-0.5 rounded border-b border-destructive/40">
+          {part}
+        </span>
+      ) : (
+        part
+      )
+    );
   };
 
   const formatDuration = (seconds: number) => {
@@ -271,27 +210,78 @@ export function LiveAnalysisView({ onCallEnd }: LiveAnalysisViewProps) {
 
   const getRiskColor = (risk: number) => {
     if (risk >= 0.8) return 'text-destructive';
-    if (risk >= 0.5) return 'text-yellow-500';
-    return 'text-green-500';
+    if (risk >= 0.5) return 'text-warning';
+    return 'text-success';
   };
 
   const getRiskBg = (risk: number) => {
-    if (risk >= 0.8) return 'bg-destructive/20 border-destructive/50';
-    if (risk >= 0.5) return 'bg-yellow-500/20 border-yellow-500/50';
-    return 'bg-green-500/20 border-green-500/50';
+    if (risk >= 0.8) return 'bg-destructive/10 border-destructive/20';
+    if (risk >= 0.5) return 'bg-warning/10 border-warning/20';
+    return 'bg-success/10 border-success/20';
   };
+
+  const allIndicators = [
+    ...(liveAnalysis.currentResult?.fraudIndicators || []),
+    ...(aiAnalysis?.fraudIndicators || [])
+  ];
 
   return (
     <div className="space-y-6">
-      {/* Control Panel */}
-      <Card className="border-border/50 bg-card/50 backdrop-blur">
-        <CardHeader className="pb-3">
+      {/* NEW: CRITICAL THREAT ALERT OVERLAY */}
+      {peakRisk > 0.7 && liveAnalysis.isRecording && (
+        <div className="fixed inset-x-0 top-20 z-50 px-4 animate-in slide-in-from-top-full duration-500">
+          <div className="max-w-xl mx-auto bg-destructive text-destructive-foreground p-4 rounded-xl shadow-2xl border-4 border-white/20 flex items-center gap-4">
+            <div className="h-12 w-12 rounded-full bg-white/20 flex items-center justify-center animate-pulse">
+              <AlertTriangle className="h-7 w-7" />
+            </div>
+            <div className="flex-1">
+              <h3 className="font-black text-lg uppercase tracking-tighter">Immediate Threat Detected</h3>
+              <p className="text-sm font-bold opacity-90">
+                Pattern: {liveAnalysis.currentResult?.fraudIndicators[0] || "HIGH RISK FRAUD PATTERN FOUND"}
+              </p>
+            </div>
+            <Button 
+              variant="secondary" 
+              size="sm" 
+              className="font-bold h-10 px-4"
+              onClick={() => {
+                liveAnalysis.stop();
+                toast({ title: "Protective Stop", description: "Call analysis stopped for safety." });
+              }}
+            >
+              Hang Up
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <Card className="border-border/50 bg-card/50 backdrop-blur-xl overflow-hidden relative">
+        {/* Visual Pulse Background */}
+        {liveAnalysis.isRecording && (
+          <div className="absolute top-0 right-0 p-4">
+            <div className="flex gap-1 items-end h-8">
+              {[1, 2, 3, 4, 5].map(i => (
+                <div 
+                  key={i} 
+                  className="w-1 bg-primary/40 rounded-full animate-wave"
+                  style={{ 
+                    height: `${20 + Math.random() * 60}%`,
+                    animationDelay: `${i * 0.1}s` 
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        <CardHeader className="pb-4">
           <CardTitle className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Radio className="h-5 w-5 text-primary" />
-              Live Fraud Analysis
+              <Radio className={`h-5 w-5 ${liveAnalysis.isRecording ? 'text-destructive animate-pulse' : 'text-muted-foreground'}`} />
+              Live Fraud Analysis Engine
             </div>
-            <div className="flex items-center gap-2">
+            
+            <div className="flex items-center gap-3">
               {/* Notification Toggle */}
               <Button
                 variant="ghost"
@@ -437,11 +427,30 @@ export function LiveAnalysisView({ onCallEnd }: LiveAnalysisViewProps) {
             </div>
           )}
 
+          {/* AI Model Loading State */}
+          {transcription.isModelLoading && (
+            <div className="p-4 bg-primary/5 rounded-lg border border-primary/20 space-y-3 animate-in fade-in slide-in-from-top-4">
+              <div className="flex items-center justify-between text-sm">
+                <div className="flex items-center gap-2 text-primary">
+                  <Brain className="h-4 w-4 animate-pulse" />
+                  <span className="font-medium">Initializing AI Transcription...</span>
+                </div>
+                <span className="text-muted-foreground">{Math.round(transcription.modelProgress)}%</span>
+              </div>
+              <Progress value={transcription.modelProgress} className="h-1.5" />
+              <p className="text-[10px] text-muted-foreground text-center">
+                This only happens once. The 40MB Whisper model is being cached for offline use.
+              </p>
+            </div>
+          )}
+
           {/* Error Messages */}
           {(liveAnalysis.microphoneError || recording.error || transcription.error) && (
-            <div className="flex items-center gap-2 text-destructive text-sm">
+            <div className="flex items-center gap-2 text-destructive text-sm p-2 bg-destructive/10 rounded border border-destructive/20">
               <AlertTriangle className="h-4 w-4" />
-              {liveAnalysis.microphoneError || recording.error || transcription.error}
+              <span className="font-medium">
+                {liveAnalysis.microphoneError || recording.error || transcription.error}
+              </span>
             </div>
           )}
         </CardContent>
@@ -466,6 +475,58 @@ export function LiveAnalysisView({ onCallEnd }: LiveAnalysisViewProps) {
           </TabsList>
 
           <TabsContent value="realtime" className="mt-4 space-y-4">
+            {/* NEW: Advanced Behavioral Profiling */}
+            {liveAnalysis.behavioralProfile && (
+              <AdvancedBehavioralDashboard 
+                profile={{
+                  urgency: liveAnalysis.behavioralProfile.urgency,
+                  authority: liveAnalysis.behavioralProfile.authority,
+                  fear: liveAnalysis.behavioralProfile.fear,
+                  scarcity: liveAnalysis.behavioralProfile.scarcity,
+                  isolation: liveAnalysis.behavioralProfile.isolation,
+                }}
+                strategy={liveAnalysis.behavioralProfile.strategy}
+                threatLevel={peakRisk >= 0.8 ? 'critical' : peakRisk >= 0.5 ? 'high' : 'low'}
+              />
+            )}
+
+            {/* Deep ML Analysis Alert */}
+            {liveAnalysis.mlResult && liveAnalysis.mlResult.riskScore > 40 && (
+              <Card className={`border-2 animate-in zoom-in-95 duration-300 ${
+                liveAnalysis.mlResult.riskLevel === 'critical' ? 'border-destructive bg-destructive/10' :
+                liveAnalysis.mlResult.riskLevel === 'danger' ? 'border-orange-500 bg-orange-500/10' :
+                'border-warning bg-warning/10'
+              }`}>
+                <CardContent className="pt-6">
+                  <div className="flex items-start gap-4">
+                    <div className={`p-3 rounded-xl ${
+                      liveAnalysis.mlResult.riskLevel === 'critical' ? 'bg-destructive/20 text-destructive' : 'bg-warning/20 text-warning'
+                    }`}>
+                      <Brain className="h-6 w-6" />
+                    </div>
+                    <div className="flex-1 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-bold text-lg">Deep ML Analysis</h3>
+                        <Badge variant={liveAnalysis.mlResult.riskLevel === 'critical' ? 'destructive' : 'outline'}>
+                          {liveAnalysis.mlResult.riskLevel.toUpperCase()}
+                        </Badge>
+                      </div>
+                      <p className="text-sm font-medium">{liveAnalysis.mlResult.explanation}</p>
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        {liveAnalysis.mlResult.signals.map((s, i) => (
+                          <Badge key={i} variant="secondary" className="text-[10px]">
+                            {s.label} ({(s.probability * 100).toFixed(0)}%)
+                          </Badge>
+                        ))}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-2 border-t pt-2 italic">
+                        Recommended: {liveAnalysis.mlResult.recommendedAction}
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Deepfake / Synthetic Voice Alert */}
             {liveAnalysis.currentResult?.audioFeatures?.syntheticProbability &&
@@ -516,11 +577,11 @@ export function LiveAnalysisView({ onCallEnd }: LiveAnalysisViewProps) {
               <Card className="border-border/50 bg-card/50">
                 <CardContent className="pt-6">
                   <div className="text-center space-y-2">
-                    <Activity className="h-12 w-12 mx-auto text-primary" />
-                    <div className="text-3xl font-bold text-primary">
-                      {((liveAnalysis.currentResult?.confidenceScore || 0) * 100).toFixed(0)}%
+                    <Radio className={`h-12 w-12 mx-auto ${liveAnalysis.currentResult?.audioFeatures?.syntheticProbability && liveAnalysis.currentResult.audioFeatures.syntheticProbability > 0.5 ? 'text-purple-500 animate-pulse' : 'text-primary'}`} />
+                    <div className="text-3xl font-bold">
+                      {((liveAnalysis.currentResult?.audioFeatures?.syntheticProbability || 0) * 100).toFixed(0)}%
                     </div>
-                    <div className="text-sm text-muted-foreground">Confidence</div>
+                    <div className="text-sm text-muted-foreground">AI Voice Prob.</div>
                   </div>
                 </CardContent>
               </Card>
@@ -549,15 +610,7 @@ export function LiveAnalysisView({ onCallEnd }: LiveAnalysisViewProps) {
 
             {/* Detailed Analysis Panel */}
             <AudioAnalysisPanel
-              state={{
-                isActive: liveAnalysis.isActive,
-                currentResult: liveAnalysis.currentResult,
-                stats: liveAnalysis.stats,
-                conversationState: liveAnalysis.conversationState,
-                speakers: liveAnalysis.speakers,
-                metadata: liveAnalysis.metadata,
-                emotionalTrend: liveAnalysis.emotionalTrend,
-              }}
+              state={liveAnalysis as any}
               result={liveAnalysis.currentResult}
             />
           </TabsContent>
@@ -582,28 +635,29 @@ export function LiveAnalysisView({ onCallEnd }: LiveAnalysisViewProps) {
                 <ScrollArea className="h-[400px] w-full rounded-md border p-4">
                   {transcription.transcript ? (
                     <div className="space-y-4">
-                      <p className="text-sm leading-relaxed whitespace-pre-wrap">
-                        {transcription.transcript}
-                      </p>
-                      {transcription.segments.length > 0 && (
-                        <div className="pt-4 border-t">
-                          <h4 className="text-sm font-medium mb-2">Segments</h4>
-                          <div className="space-y-2">
-                            {transcription.segments.map((segment, idx) => (
-                              <div key={idx} className="text-xs text-muted-foreground">
-                                <span className="font-mono">[{segment.start.toFixed(1)}s - {segment.end.toFixed(1)}s]</span>
-                                <span className="ml-2">{segment.text}</span>
-                              </div>
-                            ))}
+                      {transcription.segments.map((segment, idx) => (
+                        <div key={idx} className="flex gap-4 group">
+                          <span className="text-[10px] text-muted-foreground w-12 pt-1 font-mono">
+                            {formatDuration(Math.floor(segment.start))}
+                          </span>
+                          <div className="flex-1 space-y-1">
+                            <p className="text-sm leading-relaxed">
+                              {renderHighlightedText(segment.text)}
+                            </p>
+                            {segment.confidence < 0.7 && (
+                              <Badge variant="secondary" className="text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">
+                                Low confidence
+                              </Badge>
+                            )}
                           </div>
                         </div>
-                      )}
+                      ))}
                     </div>
                   ) : (
                     <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
-                      <FileText className="h-12 w-12 mb-4 opacity-50" />
-                      <p>No transcript available yet.</p>
-                      <p className="text-xs">Start recording to begin transcription.</p>
+                      <FileText className="h-8 w-8 mb-2 opacity-50" />
+                      <p className="text-sm">No transcript available yet.</p>
+                      <p className="text-xs">Start recording to see live transcription.</p>
                     </div>
                   )}
                 </ScrollArea>
@@ -612,92 +666,46 @@ export function LiveAnalysisView({ onCallEnd }: LiveAnalysisViewProps) {
           </TabsContent>
 
           <TabsContent value="ai-analysis" className="mt-4">
-            {aiAnalysis && (
-              <div className="grid gap-4 md:grid-cols-2">
-                {/* Overall Analysis */}
-                <Card className={`border ${getRiskBg((aiAnalysis.overallRiskScore as number) / 100)}`}>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Brain className="h-5 w-5 text-primary" />
-                      AI Fraud Analysis
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="text-center">
-                      <div className={`text-4xl font-bold ${getRiskColor((aiAnalysis.overallRiskScore as number) / 100)}`}>
-                        {aiAnalysis.overallRiskScore as number}%
-                      </div>
-                      <Badge
-                        variant={
-                          aiAnalysis.riskLevel === 'blocked' ? 'destructive' :
-                            aiAnalysis.riskLevel === 'warning' ? 'secondary' : 'outline'
-                        }
-                        className="mt-2"
-                      >
-                        {aiAnalysis.riskLevel as string}
-                      </Badge>
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                      {aiAnalysis.summary as string}
-                    </p>
-                    <div className="p-3 bg-muted rounded-lg">
-                      <span className="text-sm font-medium">Recommendation:</span>
-                      <p className="text-sm text-muted-foreground mt-1">
-                        {aiAnalysis.recommendation as string}
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-
-                {/* Category Breakdown */}
-                <Card className="border-border/50 bg-card/50">
-                  <CardHeader>
-                    <CardTitle className="text-sm font-medium">Risk Categories</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    {aiAnalysis.categories && Object.entries(aiAnalysis.categories as Record<string, { score: number; evidence: string[] }>).map(([key, value]) => (
-                      <div key={key} className="space-y-1">
-                        <div className="flex justify-between text-sm">
-                          <span className="capitalize">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
-                          <span className={getRiskColor(value.score / 100)}>{value.score}%</span>
+             {aiAnalysis && (
+               <div className="grid gap-4 md:grid-cols-2">
+                 <Card className="border-primary/20 bg-primary/5">
+                   <CardHeader>
+                     <CardTitle className="text-sm">Sentiment Analysis</CardTitle>
+                   </CardHeader>
+                   <CardContent>
+                     <div className="space-y-4">
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm">Urgency Level</span>
+                          <Badge>{(aiAnalysis.urgencyScore * 100).toFixed(0)}%</Badge>
                         </div>
-                        <Progress value={value.score} className="h-2" />
-                        {value.evidence.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mt-1">
-                            {value.evidence.slice(0, 2).map((e, i) => (
-                              <Badge key={i} variant="outline" className="text-xs">
-                                {e.substring(0, 30)}...
-                              </Badge>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-
-                {/* Fraud Indicators */}
-                {aiAnalysis.fraudIndicators && (aiAnalysis.fraudIndicators as string[]).length > 0 && (
-                  <Card className="border-border/50 bg-card/50 md:col-span-2">
+                        <Progress value={aiAnalysis.urgencyScore * 100} className="h-2" />
+                        
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm">Aggression Level</span>
+                          <Badge variant="outline">{(aiAnalysis.aggressionScore * 100).toFixed(0)}%</Badge>
+                        </div>
+                        <Progress value={aiAnalysis.aggressionScore * 100} className="h-2" />
+                     </div>
+                   </CardContent>
+                 </Card>
+                 
+                 <Card className="border-border/50">
                     <CardHeader>
-                      <CardTitle className="text-sm font-medium flex items-center gap-2">
-                        <AlertTriangle className="h-4 w-4 text-destructive" />
-                        AI-Detected Fraud Indicators
-                      </CardTitle>
+                      <CardTitle className="text-sm">Detected Intent</CardTitle>
                     </CardHeader>
                     <CardContent>
                       <div className="flex flex-wrap gap-2">
-                        {(aiAnalysis.fraudIndicators as string[]).map((indicator, idx) => (
-                          <Badge key={idx} variant="destructive">
-                            {indicator}
-                          </Badge>
+                        {aiAnalysis.intents.map((intent: string, i: number) => (
+                          <Badge key={i} variant="secondary">{intent}</Badge>
                         ))}
                       </div>
+                      <p className="mt-4 text-sm text-muted-foreground italic">
+                        "{aiAnalysis.summary}"
+                      </p>
                     </CardContent>
-                  </Card>
-                )}
-              </div>
-            )}
+                 </Card>
+               </div>
+             )}
           </TabsContent>
         </Tabs>
       )}

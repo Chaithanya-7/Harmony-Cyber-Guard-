@@ -104,10 +104,20 @@ const CallDetails = () => {
 
       if (error) throw error;
       if (!data) {
+        // Fallback: Check local storage
+        const localHistory = JSON.parse(localStorage.getItem('cyber-guard-history') || '[]');
+        const localCall = localHistory.find((c: any) => c.id === id);
+        
+        if (localCall) {
+          setCall(localCall);
+          setIsLoading(false);
+          return;
+        }
+
         toast({
           variant: "destructive",
           title: "Call not found",
-          description: "The requested call record could not be found.",
+          description: "The requested call record could not be found in cloud or local storage.",
         });
         navigate("/history");
         return;

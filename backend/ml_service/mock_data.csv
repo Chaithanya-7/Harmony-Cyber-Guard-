@@ -1,0 +1,13 @@
+text,label
+"Hello I am from the IRS and you need to pay your taxes immediately or you will be arrested.",scam
+"You are so stupid and ugly I hate you so much.",harassment
+"I know where you live and I am coming to get you tonight.",threat
+"Can you please verify your social security number and bank account details?",pii_request
+"I have won the lottery and I want to share it with you just send me $100 for processing.",scam
+"How are you doing today? I hope you have a great weekend.",safe
+"Meeting at 5pm in the conference room.",safe
+"Shut up you worthless piece of trash.",harassment
+"Your account has been suspended click here to verify your identity.",scam
+"I will kill you if you tell anyone about this.",threat
+"Please send me your password so I can fix your computer.",pii_request
+"The weather is nice today.",safe

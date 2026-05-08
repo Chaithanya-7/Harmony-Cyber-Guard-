@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: cyberguard-ml-service
+    env: python
+    buildCommand: pip install -r backend/ml_service/requirements.txt
+    startCommand: cd backend/ml_service && uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: LOG_LEVEL
+        value: INFO
